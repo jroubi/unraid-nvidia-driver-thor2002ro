@@ -183,11 +183,11 @@ EOF
 
 **5. Set up `/boot/config/go` (runs at every boot):**
 
+**Important:** All NVIDIA setup must run **before** `emhttp`, because `emhttp` starts Docker. If the driver, toolkit, and `daemon.json` aren't in place before Docker starts, GPU passthrough won't work until Docker is manually restarted.
+
 ```bash
 cat > /boot/config/go << 'GOEOF'
 #!/bin/bash
-# Start the Management Utility
-/usr/local/sbin/emhttp 
 
 # --- NVIDIA Proprietary Driver (GTX 1060 / Pascal) ---
 # Install modprobe blacklist for nvidia-open
@@ -209,6 +209,9 @@ depmod -a 2>/dev/null
 insmod /lib/modules/7.0.0-thor-Unraid+/extra/nvidia/nvidia.ko 2>/dev/null
 insmod /lib/modules/7.0.0-thor-Unraid+/extra/nvidia/nvidia-uvm.ko 2>/dev/null
 insmod /lib/modules/7.0.0-thor-Unraid+/extra/nvidia/nvidia-modeset.ko 2>/dev/null
+
+# Start the Management Utility
+/usr/local/sbin/emhttp
 GOEOF
 ```
 
@@ -355,6 +358,10 @@ The NVIDIA Container Toolkit is not installed. See the "Install the NVIDIA Conta
 
 Version mismatch between `nvidia-container-runtime-hook` and `nvidia-container-cli`. All components must be from the same release. Install the complete 1.17.4 toolkit as described in the persistent install section.
 
+### Docker: `could not select device driver "" with capabilities: [[gpu]]`
+
+The NVIDIA driver, toolkit, and `daemon.json` were not in place when Docker started. In `/boot/config/go`, all NVIDIA setup must come **before** the `/usr/local/sbin/emhttp` line (which starts Docker). If you already booted with the wrong order, restart Docker: `/etc/rc.d/rc.docker restart`.
+
 ### Docker: alternative without the container toolkit
 
 If you can't get the container toolkit working, you can pass GPU devices directly without it:
@@ -416,7 +423,7 @@ rmdir /boot/config/modprobe.d 2>/dev/null
 
 ### 3. Restore `/boot/config/go` to stock
 
-Edit `/boot/config/go` and remove everything after the `emhttp` line, so it looks like:
+Edit `/boot/config/go` and remove everything except the `emhttp` line, so it looks like:
 
 ```bash
 #!/bin/bash
