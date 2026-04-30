@@ -1,10 +1,10 @@
 <?xml version='1.0' standalone='yes'?>
 <!DOCTYPE PLUGIN [
   <!ENTITY name      "nvidia-driver">
-  <!ENTITY author    "unraid">
+  <!ENTITY author    "jroubi">
   <!ENTITY version   "2026.03.19">
   <!ENTITY launch    "Settings/nvidia-driver">
-  <!ENTITY gitURL    "https://github.com/&author;/unraid-&name;/raw/master">
+  <!ENTITY gitURL    "https://github.com/jroubi/unraid-nvidia-driver-thor2002ro/raw/master">
   <!ENTITY pluginURL "&gitURL;/&name;.plg">
   <!ENTITY md5       "b78519b667ec93207a04a8ffbf38496c">
   <!ENTITY plugin    "/boot/config/plugins/&name;">
@@ -242,14 +242,14 @@ fi
 get_version() {
 #If SET_DRV_V is set to anything that starts with 47, fall back to the legacy driver as latest driver
 if [[ "${SET_DRV_V}" = 47* ]]; then
-  LAT_PACKAGE="$(wget -qO- https://api.github.com/repos/unraid/unraid-nvidia-driver/releases/tags/${KERNEL_V} | jq -r '.assets[].name' | grep "${PACKAGE}" | grep -E -v '\.md5$' | grep "\-47" | sort -V | tail -1)"
+  LAT_PACKAGE="$(wget -qO- https://api.github.com/repos/jroubi/unraid-nvidia-driver-thor2002ro/releases/tags/${KERNEL_V} | jq -r '.assets[].name' | grep "${PACKAGE}" | grep -E -v '\.md5$' | grep "\-47" | sort -V | tail -1)"
   if [ -z "${LAT_PACKAGE}" ]; then
-    LAT_PACKAGE="$(wget -qO- https://api.github.com/repos/unraid/unraid-nvidia-driver/releases/tags/${KERNEL_V} | jq -r '.assets[].name' | grep "${PACKAGE}" | grep -E -v '\.md5$' | sort -V | tail -1)"
+    LAT_PACKAGE="$(wget -qO- https://api.github.com/repos/jroubi/unraid-nvidia-driver-thor2002ro/releases/tags/${KERNEL_V} | jq -r '.assets[].name' | grep "${PACKAGE}" | grep -E -v '\.md5$' | sort -V | tail -1)"
   else
     LEGACY_DRV="true"
   fi
 else
-  LAT_PACKAGE="$(wget -qO- https://api.github.com/repos/unraid/unraid-nvidia-driver/releases/tags/${KERNEL_V} | jq -r '.assets[].name' | grep "${PACKAGE}" | grep -E -v '\.md5$' | sort -V | tail -1)"
+  LAT_PACKAGE="$(wget -qO- https://api.github.com/repos/jroubi/unraid-nvidia-driver-thor2002ro/releases/tags/${KERNEL_V} | jq -r '.assets[].name' | grep "${PACKAGE}" | grep -E -v '\.md5$' | sort -V | tail -1)"
 fi
 if [ -z "$LAT_PACKAGE" ]; then
   if [ -z "$CUR_V" ]; then
@@ -335,6 +335,7 @@ fi
 
 #Set variables
 KERNEL_V="$(uname -r)"
+KERNEL_V="${KERNEL_V//+/}"    # Strip '+' for GitHub compatibility
 SET_DRV_V="$(grep "driver_version" "&plugin;/settings.cfg" | cut -d '=' -f2)"
 if [ "${SET_DRV_V}" == "latest_nos" ]; then
   export PACKAGE="nvos"
@@ -342,7 +343,7 @@ if [ "${SET_DRV_V}" == "latest_nos" ]; then
 else
   export PACKAGE="nvidia"
 fi
-DL_URL="https://github.com/unraid/unraid-nvidia-driver/releases/download/${KERNEL_V}"
+DL_URL="https://github.com/jroubi/unraid-nvidia-driver-thor2002ro/releases/download/${KERNEL_V}"
 UPDATE_CHECK="$(grep "update_check" &plugin;/settings.cfg | head -1 | cut -d '=' -f2)"
 
 if [ ! -d "&packages;/${KERNEL_V%%-*}" ]; then
