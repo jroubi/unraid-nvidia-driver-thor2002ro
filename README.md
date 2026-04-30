@@ -20,7 +20,6 @@ NVIDIA 580.126.18 is the **last proprietary driver version** that supports Pasca
 ```
 .
 ├── README.md
-├── nvidia-driver.plg            # Unraid plugin file (forked from unraid/unraid-nvidia-driver)
 ├── config.gz                    # Kernel config from running Unraid server
 ├── build/
 │   ├── Dockerfile               # Ubuntu 24.04 build environment (clang, Go, kernel deps)
@@ -101,14 +100,75 @@ nvidia-smi
 
 Unraid's `/lib/modules/` is in RAM and gets wiped on reboot. To make the driver persistent:
 
-**1. Save the package to the USB flash drive:**
+**1. Save the driver package to the USB flash drive:**
 
 ```bash
 mkdir -p /boot/config/plugins/nvidia-custom
 cp /tmp/nvidia-580.126.18-x86_64-thor.txz /boot/config/plugins/nvidia-custom/
 ```
 
-**2. Create a modprobe blacklist:**
+**2. Install the NVIDIA Container Toolkit (for Docker `--gpus` support):**
+
+The driver `.txz` includes `nvidia-smi` and kernel modules, but Docker GPU passthrough (`--gpus all`, `--runtime=nvidia`, Compose `deploy.resources.reservations`) requires the [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit). Download the matching 1.17.4 RPMs and extract them:
+
+```bash
+cd /tmp
+wget https://github.com/NVIDIA/nvidia-container-toolkit/releases/download/v1.17.4/nvidia-container-toolkit_1.17.4_rpm_x86_64.tar.gz
+mkdir -p toolkit-rpms && tar xf nvidia-container-toolkit_1.17.4_rpm_x86_64.tar.gz -C toolkit-rpms
+RPMDIR="/tmp/toolkit-rpms/release-v1.17.4-stable/packages/centos7/x86_64"
+
+docker run --rm -v /tmp:/tmp rockylinux:9 bash -c "
+  yum install -y cpio &&
+  mkdir -p /tmp/toolkit-install &&
+  cd /tmp/toolkit-install &&
+  rpm2cpio $RPMDIR/libnvidia-container1-1.17.4-1.x86_64.rpm | cpio -idmv &&
+  rpm2cpio $RPMDIR/libnvidia-container-tools-1.17.4-1.x86_64.rpm | cpio -idmv &&
+  rpm2cpio $RPMDIR/nvidia-container-toolkit-base-1.17.4-1.x86_64.rpm | cpio -idmv &&
+  rpm2cpio $RPMDIR/nvidia-container-toolkit-1.17.4-1.x86_64.rpm | cpio -idmv
+"
+
+# Install to system
+cp -af /tmp/toolkit-install/usr/bin/* /usr/bin/
+cp -af /tmp/toolkit-install/usr/lib64/* /usr/lib64/
+ldconfig
+
+# Save to USB for boot persistence
+mkdir -p /tmp/nvidia-toolkit-pkg/usr/lib64 /tmp/nvidia-toolkit-pkg/usr/bin
+cp /usr/bin/nvidia-container-cli /usr/bin/nvidia-container-runtime-hook /usr/bin/nvidia-ctk /usr/bin/nvidia-container-runtime /tmp/nvidia-toolkit-pkg/usr/bin/ 2>/dev/null
+cp /usr/lib64/libnvidia-container* /tmp/nvidia-toolkit-pkg/usr/lib64/
+tar cf /boot/config/plugins/nvidia-custom/nvidia-container-toolkit-1.17.4.tar -C /tmp/nvidia-toolkit-pkg .
+
+# Verify
+nvidia-container-cli info
+
+# Clean up
+rm -rf /tmp/toolkit-rpms /tmp/toolkit-install /tmp/nvidia-toolkit-pkg
+rm -f /tmp/nvidia-container-toolkit_1.17.4_rpm_x86_64.tar.gz
+docker rmi rockylinux:9 2>/dev/null
+```
+
+**3. Configure Docker runtime:**
+
+```bash
+cat > /etc/docker/daemon.json << 'EOF'
+{
+  "runtimes": {
+    "nvidia": {
+      "args": [],
+      "path": "nvidia-container-runtime-hook"
+    }
+  }
+}
+EOF
+
+# Save to USB
+cp /etc/docker/daemon.json /boot/config/plugins/nvidia-custom/daemon.json
+
+# Restart Docker
+/etc/rc.d/rc.docker restart
+```
+
+**4. Create a modprobe blacklist:**
 
 ```bash
 mkdir -p /boot/config/modprobe.d
@@ -121,15 +181,30 @@ install nvidia-drm insmod /lib/modules/7.0.0-thor-Unraid+/extra/nvidia/nvidia-dr
 EOF
 ```
 
-**3. Add to `/boot/config/go` (runs at every boot):**
+**5. Set up `/boot/config/go` (runs at every boot):**
 
 ```bash
-cat >> /boot/config/go << 'GOEOF'
+cat > /boot/config/go << 'GOEOF'
+#!/bin/bash
+# Start the Management Utility
+/usr/local/sbin/emhttp 
 
 # --- NVIDIA Proprietary Driver (GTX 1060 / Pascal) ---
+# Install modprobe blacklist for nvidia-open
 cp /boot/config/modprobe.d/nvidia-proprietary.conf /etc/modprobe.d/ 2>/dev/null
+
+# Extract driver package (kernel modules + userspace)
 installpkg /boot/config/plugins/nvidia-custom/nvidia-580.126.18-x86_64-thor.txz 2>/dev/null || \
   tar xf /boot/config/plugins/nvidia-custom/nvidia-580.126.18-x86_64-thor.txz -C /
+
+# Install NVIDIA Container Toolkit (for Docker --gpus support)
+tar xf /boot/config/plugins/nvidia-custom/nvidia-container-toolkit-1.17.4.tar -C /
+ldconfig 2>/dev/null
+
+# Restore Docker daemon config for nvidia runtime
+cp /boot/config/plugins/nvidia-custom/daemon.json /etc/docker/daemon.json 2>/dev/null
+
+# Rebuild module database and load driver
 depmod -a 2>/dev/null
 insmod /lib/modules/7.0.0-thor-Unraid+/extra/nvidia/nvidia.ko 2>/dev/null
 insmod /lib/modules/7.0.0-thor-Unraid+/extra/nvidia/nvidia-uvm.ko 2>/dev/null
@@ -137,13 +212,42 @@ insmod /lib/modules/7.0.0-thor-Unraid+/extra/nvidia/nvidia-modeset.ko 2>/dev/nul
 GOEOF
 ```
 
-**4. Reboot and verify:**
+**6. Reboot and verify:**
 
 ```bash
 reboot
 # After reboot:
 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu24.04 nvidia-smi
 ```
+
+## Docker GPU passthrough
+
+Once the driver and container toolkit are installed, containers can use the GPU in multiple ways:
+
+| Method | Docker CLI | Docker Compose |
+|--------|-----------|----------------|
+| `--gpus all` | `docker run --gpus all ...` | `deploy: resources: reservations: devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]` |
+| `--runtime=nvidia` | `docker run --runtime=nvidia ...` | `runtime: nvidia` |
+| Direct device pass | `docker run --device /dev/nvidia0 ...` | `devices: ["/dev/nvidia0:/dev/nvidia0", ...]` |
+
+**Verify GPU inside a container:**
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu24.04 nvidia-smi
+```
+
+### Version compatibility
+
+All NVIDIA container toolkit components must be from the **same release**. Mixing versions (e.g. `nvidia-ctk` from latest with `nvidia-container-cli` from 1.17.4) causes errors like `unrecognized option '--cuda-compat-mode=ldconfig'`.
+
+| Component | Version | Source |
+|-----------|---------|--------|
+| `nvidia-container-cli` | 1.17.4 | RPM: `libnvidia-container-tools` |
+| `libnvidia-container.so.1` | 1.17.4 | RPM: `libnvidia-container1` |
+| `libnvidia-container-go.so.1` | 1.17.4 | RPM: `libnvidia-container1` |
+| `nvidia-ctk` | 1.17.4 | RPM: `nvidia-container-toolkit-base` |
+| `nvidia-container-runtime-hook` | 1.17.4 | RPM: `nvidia-container-toolkit` |
 
 ## Kernel 7.0 compatibility patches
 
@@ -200,9 +304,24 @@ The `.txz` package contains:
   - `nvidia-modeset.ko` (mode setting)
   - `nvidia-drm.ko` (DRM interface)
   - `nvidia-peermem.ko` (peer memory / GPUDirect RDMA)
-- **Binaries** (`/usr/bin/`): `nvidia-smi`, `nvidia-persistenced`, `nvidia-settings`, `nvidia-xconfig`, `nvidia-ctk`, `nvidia-container-runtime-hook`
+- **Binaries** (`/usr/bin/`): `nvidia-smi`, `nvidia-persistenced`, `nvidia-settings`, `nvidia-xconfig`
 - **Libraries** (`/usr/lib64/`): ~80 shared libraries (CUDA, OpenGL, Vulkan, NVML, etc.)
 - **Container runtime config** (`/etc/nvidia-container-runtime/`, `/etc/docker/`)
+
+### USB flash drive layout (`/boot/config/`)
+
+After persistent install, your USB flash drive contains:
+
+```
+/boot/config/
+├── go                                                    # Boot script (loads driver + toolkit)
+├── modprobe.d/
+│   └── nvidia-proprietary.conf                           # Blacklists nvidia-open
+└── plugins/nvidia-custom/
+    ├── nvidia-580.126.18-x86_64-thor.txz                 # Driver package (237MB)
+    ├── nvidia-container-toolkit-1.17.4.tar               # Container toolkit binaries + libs
+    └── daemon.json                                       # Docker runtime config
+```
 
 ## Troubleshooting
 
@@ -228,6 +347,39 @@ The build did not apply the `mmap_lock.h` stub correctly. Rebuild with the lates
 
 The build produced open-source modules. Ensure `NV_KERNEL_MODULE_TYPE=proprietary` is set in `build.sh`.
 
+### Docker: `nvidia-container-cli: executable file not found in $PATH`
+
+The NVIDIA Container Toolkit is not installed. See the "Install the NVIDIA Container Toolkit" section above. Docker's `--gpus all`, `--runtime=nvidia`, and Compose `deploy.resources.reservations.devices` all require `nvidia-container-cli`.
+
+### Docker: `unrecognized option '--cuda-compat-mode=ldconfig'`
+
+Version mismatch between `nvidia-container-runtime-hook` and `nvidia-container-cli`. All components must be from the same release. Install the complete 1.17.4 toolkit as described in the persistent install section.
+
+### Docker: alternative without the container toolkit
+
+If you can't get the container toolkit working, you can pass GPU devices directly without it:
+
+```bash
+docker run --rm \
+  --device /dev/nvidia0 \
+  --device /dev/nvidiactl \
+  --device /dev/nvidia-uvm \
+  --device /dev/nvidia-uvm-tools \
+  your-image
+```
+
+For Docker Compose, replace the `deploy.resources.reservations` block with:
+
+```yaml
+devices:
+  - /dev/nvidia0:/dev/nvidia0
+  - /dev/nvidiactl:/dev/nvidiactl
+  - /dev/nvidia-uvm:/dev/nvidia-uvm
+  - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+```
+
+This bypasses the container toolkit entirely but won't auto-mount NVIDIA libraries into the container. Most GPU-aware images (Jellyfin, Plex, Immich) bundle their own CUDA/NVML libraries so this usually works fine.
+
 ### Module loads but GPU not detected
 
 Check if the GPU is bound to `vfio-pci` (passthrough):
@@ -236,6 +388,99 @@ lspci -k | grep -A3 -i nvidia
 ```
 
 If it shows `Kernel driver in use: vfio-pci`, unbind it first or remove the GPU from your VM configuration.
+
+## Complete uninstall / revert to stock Unraid
+
+To remove everything and go back to a clean Unraid setup:
+
+### 1. Unload the NVIDIA driver (live session)
+
+```bash
+# Remove modules in reverse dependency order
+rmmod nvidia-drm 2>/dev/null
+rmmod nvidia-modeset 2>/dev/null
+rmmod nvidia-uvm 2>/dev/null
+rmmod nvidia 2>/dev/null
+```
+
+### 2. Remove files from the USB flash drive
+
+```bash
+# Remove driver package, container toolkit, and Docker config
+rm -rf /boot/config/plugins/nvidia-custom
+
+# Remove modprobe blacklist
+rm -f /boot/config/modprobe.d/nvidia-proprietary.conf
+rmdir /boot/config/modprobe.d 2>/dev/null
+```
+
+### 3. Restore `/boot/config/go` to stock
+
+Edit `/boot/config/go` and remove everything after the `emhttp` line, so it looks like:
+
+```bash
+#!/bin/bash
+# Start the Management Utility
+/usr/local/sbin/emhttp
+```
+
+Or run this one-liner:
+
+```bash
+cat > /boot/config/go << 'EOF'
+#!/bin/bash
+# Start the Management Utility
+/usr/local/sbin/emhttp
+EOF
+```
+
+### 4. Remove installed files from RAM filesystem (current session)
+
+These will also be gone after a reboot since they live in RAM, but to clean up immediately:
+
+```bash
+# Kernel modules
+rm -rf /lib/modules/$(uname -r)/extra/nvidia
+
+# Userspace binaries
+rm -f /usr/bin/nvidia-smi /usr/bin/nvidia-persistenced /usr/bin/nvidia-settings /usr/bin/nvidia-xconfig
+
+# Container toolkit binaries
+rm -f /usr/bin/nvidia-container-cli /usr/bin/nvidia-container-runtime-hook /usr/bin/nvidia-ctk /usr/bin/nvidia-container-runtime
+
+# Container toolkit libraries
+rm -f /usr/lib64/libnvidia-container*
+
+# NVIDIA libraries (installed by the driver package)
+rm -f /usr/lib64/libnvidia-* /usr/lib64/libcuda* /usr/lib64/libnvcuvid* /usr/lib64/libnvoptix*
+
+# Config files
+rm -f /etc/docker/daemon.json
+rm -rf /etc/nvidia-container-runtime
+
+# Modprobe blacklist
+rm -f /etc/modprobe.d/nvidia-proprietary.conf
+
+# Rebuild module database and library cache
+depmod -a
+ldconfig
+```
+
+### 5. Restart Docker
+
+```bash
+/etc/rc.d/rc.docker restart
+```
+
+### 6. Reboot
+
+```bash
+reboot
+```
+
+After reboot, Unraid will be back to its stock configuration. The `nvidia-open` driver that ships with Thor's kernel will load normally again (though it still won't support Pascal GPUs).
+
+**What's safe to delete:** Everything listed above lives either on the USB flash drive (`/boot/config/`) or in Unraid's RAM filesystem. Nothing touches the array, cache drives, or Docker container data. Your containers, VMs, shares, and array data are completely unaffected.
 
 ## Credits
 
