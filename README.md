@@ -155,7 +155,7 @@ cat > /etc/docker/daemon.json << 'EOF'
   "runtimes": {
     "nvidia": {
       "args": [],
-      "path": "nvidia-container-runtime-hook"
+      "path": "nvidia-container-runtime"
     }
   }
 }
